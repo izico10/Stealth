@@ -16,10 +16,11 @@ from vocabulary import Vocabulary
 USE_NN_PROJECTION = True
 USE_TERNARY_WEIGHTS = True
 PROJECTION_WEIGHT_DENSITY = 0.1
-USE_CENTERING = True
+USE_CENTERING = False
 SDR_DIMS = 1024
 DENSITY_K = int((10/100) * SDR_DIMS)
-N_EPOCHS = 50
+VOCAB_SIZE = 5000
+N_EPOCHS = 200
 
 # Silence external loggers
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -35,8 +36,10 @@ def embedder() -> WordEmbedder:
     return WordEmbedder()
 
 @pytest.fixture(scope="module")
-def vocab() -> Vocabulary:
-    return Vocabulary()
+def vocab(embedder: WordEmbedder) -> Vocabulary:
+    """Initializes the vocabulary with the top tokens from the embedder."""
+    tokens = embedder.get_vocabulary_tokens(max_tokens=VOCAB_SIZE)
+    return Vocabulary(custom_words=tokens)
 
 @pytest.fixture(scope="module")
 def sae(embedder: WordEmbedder, vocab: Vocabulary) -> SparseAutoencoder:
@@ -54,7 +57,7 @@ def sae(embedder: WordEmbedder, vocab: Vocabulary) -> SparseAutoencoder:
     )
     
     if USE_NN_PROJECTION:
-        logger.info(f"USE_NN_PROJECTION is True. Training SAE for {N_EPOCHS} epochs...")
+        logger.info(f"USE_NN_PROJECTION is True. Training SAE on {len(vocab)} words for {N_EPOCHS} epochs...")
         training_data = embedder.embed_batch(vocab.get_words())
         sae_instance.train(training_data, epochs=N_EPOCHS, lr=0.01)
         logger.info("SAE training complete.")

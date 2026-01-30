@@ -63,6 +63,33 @@ class WordEmbedder:
         """
         return self.embedding_dim
 
+    def get_vocabulary_tokens(self, max_tokens: int = 1000) -> list[str]:
+        """
+        Extracts the most common tokens from the underlying model's tokenizer.
+        
+        Args:
+            max_tokens: The maximum number of tokens to retrieve.
+            
+        Returns:
+            A list of string tokens.
+        """
+        # Get the full vocabulary from the tokenizer
+        tokenizer = self.model.tokenizer
+        vocab = tokenizer.get_vocab()
+        
+        # Sort by index (which usually corresponds to frequency in BERT-style models)
+        sorted_vocab = sorted(vocab.items(), key=lambda x: x[1])
+        
+        # Filter out special tokens (usually start with [ or ##)
+        clean_tokens = []
+        for token, idx in sorted_vocab:
+            if not (token.startswith('[') and token.endswith(']')) and not token.startswith('##'):
+                clean_tokens.append(token)
+            if len(clean_tokens) >= max_tokens:
+                break
+                
+        return clean_tokens
+
 def cosine_similarity(v1: np.ndarray, v2: np.ndarray) -> float:
     """
     Calculates the cosine similarity between two vectors.
