@@ -75,7 +75,7 @@ class SparseAutoencoder:
         self, 
         input_dims: int, 
         sdr_dims: int = 10000, 
-        sparsity_k: int = 50, 
+        density_k: int = 50, 
         use_ternary_projection: bool = True,
         projection_weight_density: float = 0.1,
         seed: int = 42
@@ -86,14 +86,14 @@ class SparseAutoencoder:
         Args:
             input_dims: Dimension of the input dense embeddings.
             sdr_dims: Dimension of the output SDR.
-            sparsity_k: Number of active bits to keep (sparsity constraint).
+            density_k: Number of active bits to keep (sparsity constraint).
             use_ternary_projection: If True, uses a sparse ternary matrix (-1, 0, 1).
             projection_weight_density: Probability of a non-zero weight in ternary mode.
             seed: Random seed for reproducibility.
         """
         self.input_dims: int = input_dims
         self.sdr_dims: int = sdr_dims
-        self.sparsity_k: int = sparsity_k
+        self.density_k: int = density_k
         self.use_ternary_projection: bool = use_ternary_projection
         self.projection_weight_density: float = projection_weight_density
         
@@ -121,13 +121,13 @@ class SparseAutoencoder:
             dense_vector: The input embedding.
             
         Returns:
-            An SDR instance with exactly sparsity_k active bits.
+            An SDR instance with exactly density_k active bits.
         """
         # Project to high-dimensional space
         activations: np.ndarray = np.dot(dense_vector, self.weights)
         
-        # Top-K selection: find indices of the sparsity_k largest activations
-        top_k_indices: np.ndarray = np.argpartition(activations, -self.sparsity_k)[-self.sparsity_k:]
+        # Top-K selection: find indices of the density_k largest activations
+        top_k_indices: np.ndarray = np.argpartition(activations, -self.density_k)[-self.density_k:]
         
         return SDR(self.sdr_dims, top_k_indices)
 
@@ -147,7 +147,7 @@ class SparseAutoencoder:
         sdrs: list[SDR] = []
         for i in range(batch_activations.shape[0]):
             activations: np.ndarray = batch_activations[i]
-            top_k_indices: np.ndarray = np.argpartition(activations, -self.sparsity_k)[-self.sparsity_k:]
+            top_k_indices: np.ndarray = np.argpartition(activations, -self.density_k)[-self.density_k:]
             sdrs.append(SDR(self.sdr_dims, top_k_indices))
             
         return sdrs

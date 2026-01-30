@@ -10,12 +10,13 @@ import logging
 import os
 from sae import SDR, SparseAutoencoder
 from word_embedder import WordEmbedder, cosine_similarity
+from vocabulary import Vocabulary
 
 # Global parameters for quick testing and configuration
-USE_TERNARY_PROJECTION = False
+USE_TERNARY_PROJECTION = True
 PROJECTION_WEIGHT_DENSITY = 0.1
-SDR_DIMS = 10000
-SPARSITY_K = int((5/100) * SDR_DIMS)
+SDR_DIMS = 1024*10
+DENSITY_K = int((5/100) * SDR_DIMS)
 
 # Silence external loggers
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -36,10 +37,14 @@ def sae(embedder: WordEmbedder) -> SparseAutoencoder:
     return SparseAutoencoder(
         input_dims=embedder.get_dimension(), 
         sdr_dims=SDR_DIMS, 
-        sparsity_k=SPARSITY_K,
+        density_k=DENSITY_K,
         use_ternary_projection=USE_TERNARY_PROJECTION,
         projection_weight_density=PROJECTION_WEIGHT_DENSITY
     )
+
+@pytest.fixture(scope="module")
+def vocab() -> Vocabulary:
+    return Vocabulary()
 
 def get_sdr_metrics(sdr1: SDR, sdr2: SDR) -> tuple[int, float, float]:
     """
@@ -48,13 +53,13 @@ def get_sdr_metrics(sdr1: SDR, sdr2: SDR) -> tuple[int, float, float]:
     """
     intersection = len(sdr1.active_indices.intersection(sdr2.active_indices))
     
+    # We use the length of sdr1 as the denominator for overlap percentage
     overlap_pct = intersection / len(sdr1) if len(sdr1) > 0 else 0.0
     
     # Chance overlap probability
-    p_chance = SPARSITY_K / SDR_DIMS
+    p_chance = DENSITY_K / SDR_DIMS
     # Normalized Similarity: (Observed - Chance) / (Max - Chance)
     norm_sim = (overlap_pct - p_chance) / (1.0 - p_chance)
-    # Clip at 0 to avoid negative values for unrelated items
     norm_sim = max(0.0, norm_sim)
     
     return intersection, overlap_pct, norm_sim
@@ -77,7 +82,7 @@ def test_sae_encoding_sparsity(sae: SparseAutoencoder) -> None:
     """Ensures the SAE produces SDRs with the exact requested sparsity."""
     vec = np.random.rand(sae.input_dims).astype(np.float32)
     sdr = sae.encode(vec)
-    assert len(sdr) == SPARSITY_K
+    assert len(sdr) == DENSITY_K
 
 def test_sae_semantic_preservation(embedder: WordEmbedder, sae: SparseAutoencoder) -> None:
     """
@@ -94,7 +99,7 @@ def test_sae_semantic_preservation(embedder: WordEmbedder, sae: SparseAutoencode
         ("happy", "joyful", "Similar")
     ]
     
-    logger.info(f"Config: SDR_DIMS={SDR_DIMS}, SPARSITY_K={SPARSITY_K}, TERNARY={USE_TERNARY_PROJECTION}")
+    logger.info(f"Config: SDR_DIMS={SDR_DIMS}, DENSITY_K={DENSITY_K}, TERNARY={USE_TERNARY_PROJECTION}")
     header = f"{'Pair':<20} | {'Type':<10} | {'Dense Cos':<10} | {'Bits':<5} | {'Overlap %':<10} | {'Norm Sim':<8}"
     logger.info(header)
     logger.info("-" * len(header))
@@ -112,7 +117,6 @@ def test_sae_semantic_preservation(embedder: WordEmbedder, sae: SparseAutoencode
         row = f"{f'{w1}/{w2}':<20} | {ptype:<10} | {dense_sim:10.4f} | {bits:<5} | {overlap_pct:10.2%} | {norm_sim:8.4f}"
         logger.info(row)
         
-        # Only include Similar and Dissimilar in the average calculations
         if ptype in ["Similar", "Dissimilar"]:
             results.append((ptype, dense_sim, norm_sim))
 
@@ -126,7 +130,61 @@ def test_sae_semantic_preservation(embedder: WordEmbedder, sae: SparseAutoencode
     logger.info(f"Average Similar Norm Sim:    {avg_sim:.4f}")
     logger.info(f"Average Dissimilar Norm Sim: {avg_dis:.4f}")
     
-    assert avg_sim > avg_dis, "SDR space failed to preserve relative semantic distances"
+    assert avg_sim > avg_dis
+
+def test_sae_analogy_logic(embedder: WordEmbedder, sae: SparseAutoencoder, vocab: Vocabulary) -> None:
+    """
+    Tests the King - Man + Woman = Queen analogy in both spaces.
+    """
+    # 1. Prepare embeddings
+    v_king = embedder.embed("king")
+    v_man = embedder.embed("man")
+    v_woman = embedder.embed("woman")
+    v_queen = embedder.embed("queen")
+    v_bike = embedder.embed("bike")
+    all_words = vocab.get_words()
+    word_embs = embedder.embed_batch(all_words)
+    
+    # 2. Dense Analogy
+    v_target = v_king - v_man + v_woman
+    nearest_dense, sim_dense = vocab.find_nearest(v_target, word_embs, exclude_words=["king", "man", "woman"])
+    logger.info(f"Dense Analogy (King - Man + Woman): Result='{nearest_dense}', Similarity={sim_dense:.4f}")
+    
+    # 3. Dense Superposition (King + Woman)
+    v_combined_dense = v_king + v_woman
+    cos_combined_queen = cosine_similarity(v_combined_dense, v_queen)
+    cos_combined_bike = cosine_similarity(v_combined_dense, v_bike)
+    logger.info(f"Dense Superposition (King + Woman) vs Queen: Cosine={cos_combined_queen:.4f}")
+    logger.info(f"Dense Superposition (King + Woman) vs Bike:  Cosine={cos_combined_bike:.4f}")
+    
+    # 4. SDR Superposition (King + Woman) - Logical OR
+    sdr_king = sae.encode(v_king)
+    sdr_woman = sae.encode(v_woman)
+    sdr_queen = sae.encode(v_queen)
+    sdr_bike = sae.encode(v_bike)
+    
+    combined_indices_or = sdr_king.active_indices.union(sdr_woman.active_indices)
+    sdr_or = SDR(SDR_DIMS, combined_indices_or)
+    
+    bits_or_q, overlap_or_q, _ = get_sdr_metrics(sdr_or, sdr_queen)
+    bits_or_b, overlap_or_b, _ = get_sdr_metrics(sdr_or, sdr_bike)
+    logger.info(f"SDR OR (King + Woman) vs Queen:     Bits={bits_or_q}, Overlap={overlap_or_q:.2%}, Sparsity={len(sdr_or)/SDR_DIMS:.2%}")
+    logger.info(f"SDR OR (King + Woman) vs Bike:      Bits={bits_or_b}, Overlap={overlap_or_b:.2%}")
+    
+    # 5. SDR Superposition (King + Woman) - Thresholded (Maintaining Sparsity K)
+    activations_king = np.dot(v_king, sae.weights)
+    activations_woman = np.dot(v_woman, sae.weights)
+    combined_activations = activations_king + activations_woman
+    
+    top_k_indices = np.argpartition(combined_activations, -DENSITY_K)[-DENSITY_K:]
+    sdr_thresholded = SDR(SDR_DIMS, top_k_indices)
+    
+    bits_th_q, overlap_th_q, _ = get_sdr_metrics(sdr_thresholded, sdr_queen)
+    bits_th_b, overlap_th_b, _ = get_sdr_metrics(sdr_thresholded, sdr_bike)
+    logger.info(f"SDR Top-K (King + Woman) vs Queen:  Bits={bits_th_q}, Overlap={overlap_th_q:.2%}, Sparsity={len(sdr_thresholded)/SDR_DIMS:.2%}")
+    logger.info(f"SDR Top-K (King + Woman) vs Bike:   Bits={bits_th_b}, Overlap={overlap_th_b:.2%}")
+    
+    assert overlap_th_q > overlap_th_b
 
 def test_sae_batch_consistency(sae: SparseAutoencoder) -> None:
     """Ensures batch encoding matches individual encoding."""
