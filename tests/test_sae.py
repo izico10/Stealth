@@ -15,7 +15,7 @@ from word_embedder import WordEmbedder, cosine_similarity
 USE_TERNARY_PROJECTION = False
 PROJECTION_WEIGHT_DENSITY = 0.1
 SDR_DIMS = 10000
-SPARSITY_K = int(0.005 * SDR_DIMS)
+SPARSITY_K = int((5/100) * SDR_DIMS)
 
 # Silence external loggers
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -44,15 +44,20 @@ def sae(embedder: WordEmbedder) -> SparseAutoencoder:
 def get_sdr_metrics(sdr1: SDR, sdr2: SDR) -> tuple[int, float, float]:
     """
     Calculates various similarity metrics between two SDRs.
-    Returns: (Overlap Count, Overlap Percentage, Jaccard Similarity)
+    Returns: (Overlap Count, Overlap %, Normalized Similarity)
     """
     intersection = len(sdr1.active_indices.intersection(sdr2.active_indices))
-    union = len(sdr1.active_indices.union(sdr2.active_indices))
     
     overlap_pct = intersection / len(sdr1) if len(sdr1) > 0 else 0.0
-    jaccard = intersection / union if union > 0 else 0.0
     
-    return intersection, overlap_pct, jaccard
+    # Chance overlap probability
+    p_chance = SPARSITY_K / SDR_DIMS
+    # Normalized Similarity: (Observed - Chance) / (Max - Chance)
+    norm_sim = (overlap_pct - p_chance) / (1.0 - p_chance)
+    # Clip at 0 to avoid negative values for unrelated items
+    norm_sim = max(0.0, norm_sim)
+    
+    return intersection, overlap_pct, norm_sim
 
 def test_sdr_basic_properties() -> None:
     """Verifies SDR initialization and properties."""
@@ -80,6 +85,7 @@ def test_sae_semantic_preservation(embedder: WordEmbedder, sae: SparseAutoencode
     Ensures that the relative semantic relationships are preserved after projection.
     """
     test_pairs = [
+        ("apple", "apple", "Identity"),
         ("cat", "kitten", "Similar"),
         ("dog", "puppy", "Similar"),
         ("apple", "bicycle", "Dissimilar"),
@@ -89,7 +95,7 @@ def test_sae_semantic_preservation(embedder: WordEmbedder, sae: SparseAutoencode
     ]
     
     logger.info(f"Config: SDR_DIMS={SDR_DIMS}, SPARSITY_K={SPARSITY_K}, TERNARY={USE_TERNARY_PROJECTION}")
-    header = f"{'Pair':<20} | {'Type':<10} | {'Dense Cos':<10} | {'Bits':<6} | {'Overlap %':<10} | {'Jaccard':<8}"
+    header = f"{'Pair':<20} | {'Type':<10} | {'Dense Cos':<10} | {'Bits':<5} | {'Overlap %':<10} | {'Norm Sim':<8}"
     logger.info(header)
     logger.info("-" * len(header))
     
@@ -101,21 +107,24 @@ def test_sae_semantic_preservation(embedder: WordEmbedder, sae: SparseAutoencode
         
         sdr1 = sae.encode(emb1)
         sdr2 = sae.encode(emb2)
-        bits, overlap_pct, jaccard = get_sdr_metrics(sdr1, sdr2)
+        bits, overlap_pct, norm_sim = get_sdr_metrics(sdr1, sdr2)
         
-        row = f"{f'{w1}/{w2}':<20} | {ptype:<10} | {dense_sim:10.4f} | {bits:<6} | {overlap_pct:10.2%} | {jaccard:8.4f}"
+        row = f"{f'{w1}/{w2}':<20} | {ptype:<10} | {dense_sim:10.4f} | {bits:<5} | {overlap_pct:10.2%} | {norm_sim:8.4f}"
         logger.info(row)
-        results.append((ptype, dense_sim, overlap_pct))
+        
+        # Only include Similar and Dissimilar in the average calculations
+        if ptype in ["Similar", "Dissimilar"]:
+            results.append((ptype, dense_sim, norm_sim))
 
-    sim_overlaps = [r[2] for r in results if r[0] == "Similar"]
-    dis_overlaps = [r[2] for r in results if r[0] == "Dissimilar"]
+    sim_norms = [r[2] for r in results if r[0] == "Similar"]
+    dis_norms = [r[2] for r in results if r[0] == "Dissimilar"]
     
-    avg_sim = sum(sim_overlaps) / len(sim_overlaps)
-    avg_dis = sum(dis_overlaps) / len(dis_overlaps)
+    avg_sim = sum(sim_norms) / len(sim_norms)
+    avg_dis = sum(dis_norms) / len(dis_norms)
     
     logger.info("-" * len(header))
-    logger.info(f"Average Similar Overlap %:    {avg_sim:.2%}")
-    logger.info(f"Average Dissimilar Overlap %: {avg_dis:.2%}")
+    logger.info(f"Average Similar Norm Sim:    {avg_sim:.4f}")
+    logger.info(f"Average Dissimilar Norm Sim: {avg_dis:.4f}")
     
     assert avg_sim > avg_dis, "SDR space failed to preserve relative semantic distances"
 
