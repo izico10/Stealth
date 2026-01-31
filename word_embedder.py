@@ -80,15 +80,9 @@ class WordEmbedder:
         # Sort by index (which usually corresponds to frequency in BERT-style models)
         sorted_vocab = sorted(vocab.items(), key=lambda x: x[1])
         
-        # Filter out special tokens (usually start with [ or ##)
-        clean_tokens = []
-        for token, idx in sorted_vocab:
-            if not (token.startswith('[') and token.endswith(']')) and not token.startswith('##'):
-                clean_tokens.append(token)
-            if len(clean_tokens) >= max_tokens:
-                break
-                
-        return clean_tokens
+        # Return all tokens without filtering
+        tokens = [token for token, idx in sorted_vocab[:max_tokens]]
+        return tokens
 
 def cosine_similarity(v1: np.ndarray, v2: np.ndarray) -> float:
     """

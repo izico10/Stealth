@@ -14,19 +14,11 @@ logger = logging.getLogger(__name__)
 class SDR:
     """
     Represents a Sparse Distributed Representation (SDR).
-    
-    An SDR is a high-dimensional binary vector where only a small percentage 
-    of bits are active (1). This class stores the indices of active bits 
-    for efficiency.
     """
     
     def __init__(self, sdr_dims: int, active_indices: Iterable[int]) -> None:
         """
         Initializes an SDR.
-        
-        Args:
-            sdr_dims: The total dimensionality of the SDR.
-            active_indices: An iterable of indices that are set to 1.
         """
         self.sdr_dims: int = sdr_dims
         self.active_indices: set[int] = set(active_indices)
@@ -34,9 +26,6 @@ class SDR:
     def to_dense(self) -> np.ndarray:
         """
         Converts the SDR to a dense numpy array of floats (0.0 or 1.0).
-        
-        Returns:
-            A numpy array of shape (sdr_dims,).
         """
         dense: np.ndarray = np.zeros(self.sdr_dims, dtype=np.float32)
         for idx in self.active_indices:
@@ -46,16 +35,6 @@ class SDR:
     def circular_shift(self, shift: int) -> 'SDR':
         """
         Applies a circular bit-shift to the SDR.
-        
-        Shifting creates an orthogonal address in high-dimensional space, 
-        allowing the system to distinguish the same token at different 
-        sequence positions.
-        
-        Args:
-            shift: The number of positions to shift.
-            
-        Returns:
-            A new SDR instance with shifted indices.
         """
         shifted_indices: set[int] = { (idx + shift) % self.sdr_dims for idx in self.active_indices }
         return SDR(self.sdr_dims, shifted_indices)
@@ -71,9 +50,7 @@ class SparseAutoencoder:
     """
     Encodes dense vectors into Sparse Distributed Representations (SDRs).
     
-    Uses a linear projection followed by a Top-K activation function to 
-    ensure a fixed level of sparsity, which helps in achieving monosemanticity.
-    
+    Uses a linear projection followed by a Top-K activation function.
     Architecture inspired by Bricken et al. (2023) Top-K SAEs.
     """
     
@@ -113,108 +90,115 @@ class SparseAutoencoder:
         self.decoder_weights: np.ndarray = rng.standard_normal((sdr_dims, input_dims), dtype=np.float32)
         self._normalize_decoder()
         
+        # Learned Scaling Factor (s)
+        self.decoder_scale: float = 1.0 / np.sqrt(density_k)
+        
         # Biases
-        # b_pre: The mean of the data (centering)
         self.b_pre: np.ndarray = np.zeros(input_dims, dtype=np.float32)
-        # b_enc: Initialized to be negative to act as a gate
         self.encoder_bias: np.ndarray = np.full(sdr_dims, -0.1, dtype=np.float32)
 
-    def _normalize_decoder(self) -> None:
+    def _normalize_decoder(self, indices: np.ndarray = None) -> None:
         """Normalizes decoder weights to unit length (L2 = 1)."""
-        norms = np.linalg.norm(self.decoder_weights, axis=1, keepdims=True)
-        norms[norms == 0] = 1e-10
-        self.decoder_weights /= norms
+        if indices is None:
+            norms = np.linalg.norm(self.decoder_weights, axis=1, keepdims=True)
+            norms[norms == 0] = 1e-10
+            self.decoder_weights /= norms
+        else:
+            norms = np.linalg.norm(self.decoder_weights[indices], axis=1, keepdims=True)
+            norms[norms == 0] = 1e-10
+            self.decoder_weights[indices] /= norms
 
     def encode(self, dense_vector: np.ndarray) -> SDR:
         """
         Encodes a single dense vector into an SDR using Centering and Top-K.
         """
-        # Step 1: Centering
         x_centered = dense_vector - self.b_pre if self.use_centering else dense_vector
-        
-        # Step 2: Encoder Projection + Bias
         activations = np.dot(x_centered, self.encoder_weights) + self.encoder_bias
-        
-        # Step 3: Top-K Sparsity
         top_k_indices = np.argpartition(activations, -self.density_k)[-self.density_k:]
-        
         return SDR(self.sdr_dims, top_k_indices)
 
     def decode(self, sdr: SDR) -> np.ndarray:
         """
-        Reconstructs the dense vector from an SDR.
+        Reconstructs the dense vector from an SDR using the learned scale.
         """
-        # Step 4: Reconstruction (Sum active decoder weights + b_pre)
-        # Vectorized indexing for speed and hardware-alignment
         active_list = list(sdr.active_indices)
-        reconstruction = np.sum(self.decoder_weights[active_list, :], axis=0)
-            
+        reconstruction = self.decoder_scale * np.sum(self.decoder_weights[active_list, :], axis=0)
         if self.use_centering:
             reconstruction += self.b_pre
-            
         return reconstruction
 
-    def train(self, training_data: np.ndarray, epochs: int = 10, lr: float = 0.01) -> list[float]:
+    def train(self, training_data: np.ndarray, val_data: np.ndarray = None, epochs: int = 10, lr: float = 0.01, batch_size: int = 32) -> dict[str, list[float]]:
         """
-        Trains the SAE weights to minimize reconstruction error using Top-K.
-        
-        Args:
-            training_data: 2D array of embeddings (N, input_dims).
-            epochs: Number of training passes.
-            lr: Learning rate.
-            
-        Returns:
-            List of average loss per epoch.
+        Trains the SAE weights using Total Squared Error (SSE) for intuitive reporting.
         """
-        # Initialize b_pre as the mean of the training data
         if self.use_centering:
             self.b_pre = np.mean(training_data, axis=0)
             
-        logger.info(f"Starting SAE Training: epochs={epochs}, lr={lr}, samples={len(training_data)}")
-        logger.info(f"Config: sdr_dims={self.sdr_dims}, density_k={self.density_k}, centering={self.use_centering}, ternary={self.use_ternary_weights}")
+        logger.info(f"Starting SAE Training: epochs={epochs}, lr={lr}, batch_size={batch_size}, samples={len(training_data)}")
         
-        losses = []
+        history = {"train_loss": [], "val_loss": []}
         n_samples = len(training_data)
+        scale_lr = lr * 0.1
         
         for epoch in range(epochs):
             epoch_loss = 0.0
-            indices = np.random.permutation(n_samples)
+            shuffled_indices = np.random.permutation(n_samples)
+            updated_neurons = set()
+            batch_grad_scale = 0.0
             
-            for i in indices:
-                x = training_data[i]
+            for i, idx in enumerate(shuffled_indices):
+                x = training_data[idx]
+                x_centered = x - self.b_pre if self.use_centering else x
                 
-                # Forward Pass
-                sdr = self.encode(x)
-                x_hat = self.decode(sdr)
+                # 1. Forward Pass
+                activations = np.dot(x_centered, self.encoder_weights) + self.encoder_bias
+                top_k_indices = np.argpartition(activations, -self.density_k)[-self.density_k:]
                 
-                # Loss (MSE)
+                # 2. Reconstruction
+                bit_sum = np.sum(self.decoder_weights[top_k_indices], axis=0)
+                x_hat = self.decoder_scale * bit_sum
+                if self.use_centering:
+                    x_hat += self.b_pre
+                
+                # 3. Loss (Total Squared Error)
                 error = x_hat - x
-                epoch_loss += np.mean(error**2)
+                total_squared_error = np.sum(error**2)
+                epoch_loss += total_squared_error
                 
-                # Backward Pass (STE)
-                grad_x_hat = error / self.input_dims
+                # 4. Backward Pass (Simplified SSE Gradients)
+                grad_x_hat = 2.0 * error
                 
-                # Update Decoder & Normalize
-                active_list = list(sdr.active_indices)
-                self.decoder_weights[active_list, :] -= lr * grad_x_hat
-                self._normalize_decoder()
+                batch_grad_scale += np.dot(grad_x_hat, bit_sum)
+                self.decoder_weights[top_k_indices] -= lr * self.decoder_scale * grad_x_hat
                 
-                # Update Encoder (only for active bits)
-                for idx in active_list:
-                    grad_act = np.dot(grad_x_hat, self.decoder_weights[idx, :])
-                    # Update weights and bias
-                    x_centered = x - self.b_pre if self.use_centering else x
-                    self.encoder_weights[:, idx] -= lr * grad_act * x_centered
-                    self.encoder_bias[idx] -= lr * grad_act
+                grad_act = self.decoder_scale * np.dot(self.decoder_weights[top_k_indices], grad_x_hat)
+                self.encoder_weights[:, top_k_indices] -= lr * np.outer(x_centered, grad_act)
+                self.encoder_bias[top_k_indices] -= lr * grad_act
+                
+                updated_neurons.update(top_k_indices)
+                
+                if (i + 1) % batch_size == 0 or (i + 1) == n_samples:
+                    self.decoder_scale -= scale_lr * (batch_grad_scale / batch_size)
+                    self.decoder_scale = max(0.001, self.decoder_scale)
+                    batch_grad_scale = 0.0
+                    self._normalize_decoder(np.array(list(updated_neurons)))
+                    updated_neurons.clear()
             
-            avg_loss = epoch_loss / n_samples
-            losses.append(avg_loss)
+            avg_train_loss = epoch_loss / n_samples
+            history["train_loss"].append(avg_train_loss)
+            
+            avg_val_loss = 0.0
+            if val_data is not None:
+                val_errors = [np.sum((self.decode(self.encode(x_v)) - x_val)**2) for x_v, x_val in zip(val_data, val_data)]
+                avg_val_loss = np.mean(val_errors)
+                history["val_loss"].append(avg_val_loss)
             
             if (epoch + 1) % 10 == 0 or epoch == 0:
-                logger.info(f"Epoch {epoch+1}/{epochs} - Avg Loss: {avg_loss:.6f}")
+                val_str = f", Val Loss: {avg_val_loss:.4f}" if val_data is not None else ""
+                logger.info(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.4f}{val_str}, Scale: {self.decoder_scale:.4f}")
             
         logger.info("SAE Training Complete.")
-        return losses
+        return history
 
     def encode_batch(self, dense_vectors: np.ndarray) -> list[SDR]:
         """
