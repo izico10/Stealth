@@ -34,12 +34,6 @@ class WordEmbedder:
     def embed(self, word: str) -> np.ndarray:
         """
         Encodes a single word into a dense vector.
-        
-        Args:
-            word: The string token to encode.
-            
-        Returns:
-            A numpy array representing the dense embedding.
         """
         embedding: np.ndarray = self.model.encode(word, convert_to_numpy=True)
         return embedding
@@ -47,14 +41,19 @@ class WordEmbedder:
     def embed_batch(self, words: list[str]) -> np.ndarray:
         """
         Encodes a list of words independently.
-        
-        Args:
-            words: A list of string tokens.
-            
-        Returns:
-            A 2D numpy array where each row is a word embedding.
         """
         embeddings: np.ndarray = self.model.encode(words, convert_to_numpy=True)
+        return embeddings
+
+    def embed_contextual(self, text: str) -> np.ndarray:
+        """
+        Encodes a sentence and returns the contextual embedding for each token.
+        
+        This simulates the hidden states of a Transformer, which is what 
+        would be stored in a KV cache.
+        """
+        # output_value='token_embeddings' returns the hidden states for each token
+        embeddings = self.model.encode([text], output_value='token_embeddings')[0]
         return embeddings
 
     def get_dimension(self) -> int:
@@ -66,34 +65,16 @@ class WordEmbedder:
     def get_vocabulary_tokens(self, max_tokens: int = 1000) -> list[str]:
         """
         Extracts the most common tokens from the underlying model's tokenizer.
-        
-        Args:
-            max_tokens: The maximum number of tokens to retrieve.
-            
-        Returns:
-            A list of string tokens.
         """
-        # Get the full vocabulary from the tokenizer
         tokenizer = self.model.tokenizer
         vocab = tokenizer.get_vocab()
-        
-        # Sort by index (which usually corresponds to frequency in BERT-style models)
         sorted_vocab = sorted(vocab.items(), key=lambda x: x[1])
-        
-        # Return all tokens without filtering
         tokens = [token for token, idx in sorted_vocab[:max_tokens]]
         return tokens
 
 def cosine_similarity(v1: np.ndarray, v2: np.ndarray) -> float:
     """
     Calculates the cosine similarity between two vectors.
-    
-    Args:
-        v1: First vector.
-        v2: Second vector.
-        
-    Returns:
-        A float between -1.0 and 1.0 representing similarity.
     """
     norm1: float = float(np.linalg.norm(v1))
     norm2: float = float(np.linalg.norm(v2))
