@@ -127,9 +127,18 @@ class SparseAutoencoder:
             reconstruction += self.b_pre
         return reconstruction
 
-    def train(self, training_data: np.ndarray, val_data: np.ndarray = None, epochs: int = 10, lr: float = 0.01, batch_size: int = 32) -> dict[str, list[float]]:
+    def train(
+        self, 
+        training_data: np.ndarray, 
+        val_data: np.ndarray = None, 
+        epochs: int = 10, 
+        lr: float = 0.01, 
+        batch_size: int = 32,
+        patience: int = 10,
+        min_delta: float = 0.005
+    ) -> dict[str, list[float]]:
         """
-        Trains the SAE weights using Total Squared Error (SSE) for intuitive reporting.
+        Trains the SAE weights with Early Stopping based on Validation Loss.
         """
         if self.use_centering:
             self.b_pre = np.mean(training_data, axis=0)
@@ -139,6 +148,9 @@ class SparseAutoencoder:
         history = {"train_loss": [], "val_loss": []}
         n_samples = len(training_data)
         scale_lr = lr * 0.1
+        
+        best_val_loss = float('inf')
+        epochs_without_improvement = 0
         
         for epoch in range(epochs):
             epoch_loss = 0.0
@@ -150,24 +162,18 @@ class SparseAutoencoder:
                 x = training_data[idx]
                 x_centered = x - self.b_pre if self.use_centering else x
                 
-                # 1. Forward Pass
                 activations = np.dot(x_centered, self.encoder_weights) + self.encoder_bias
                 top_k_indices = np.argpartition(activations, -self.density_k)[-self.density_k:]
                 
-                # 2. Reconstruction
                 bit_sum = np.sum(self.decoder_weights[top_k_indices], axis=0)
                 x_hat = self.decoder_scale * bit_sum
                 if self.use_centering:
                     x_hat += self.b_pre
                 
-                # 3. Loss (Total Squared Error)
                 error = x_hat - x
-                total_squared_error = np.sum(error**2)
-                epoch_loss += total_squared_error
+                epoch_loss += np.sum(error**2)
                 
-                # 4. Backward Pass (Simplified SSE Gradients)
                 grad_x_hat = 2.0 * error
-                
                 batch_grad_scale += np.dot(grad_x_hat, bit_sum)
                 self.decoder_weights[top_k_indices] -= lr * self.decoder_scale * grad_x_hat
                 
@@ -187,15 +193,27 @@ class SparseAutoencoder:
             avg_train_loss = epoch_loss / n_samples
             history["train_loss"].append(avg_train_loss)
             
+            # Validation and Early Stopping
             avg_val_loss = 0.0
             if val_data is not None:
-                val_errors = [np.sum((self.decode(self.encode(x_v)) - x_val)**2) for x_v, x_val in zip(val_data, val_data)]
+                val_errors = [np.sum((self.decode(self.encode(x_v)) - x_v)**2) for x_v in val_data]
                 avg_val_loss = np.mean(val_errors)
                 history["val_loss"].append(avg_val_loss)
+                
+                # Check for improvement
+                if avg_val_loss < (best_val_loss - min_delta):
+                    best_val_loss = avg_val_loss
+                    epochs_without_improvement = 0
+                else:
+                    epochs_without_improvement += 1
             
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 val_str = f", Val Loss: {avg_val_loss:.4f}" if val_data is not None else ""
                 logger.info(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.4f}{val_str}, Scale: {self.decoder_scale:.4f}")
+            
+            if val_data is not None and epochs_without_improvement >= patience:
+                logger.info(f"Early Stopping triggered at epoch {epoch+1}. No improvement in Val Loss for {patience} epochs.")
+                break
             
         logger.info("SAE Training Complete.")
         return history

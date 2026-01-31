@@ -6,6 +6,7 @@ sequential context from leaking into the individual word representations.
 
 import os
 import numpy as np
+import torch
 from sentence_transformers import SentenceTransformer
 
 class WordEmbedder:
@@ -52,9 +53,13 @@ class WordEmbedder:
         This simulates the hidden states of a Transformer, which is what 
         would be stored in a KV cache.
         """
-        # output_value='token_embeddings' returns the hidden states for each token
+        # output_value='token_embeddings' returns hidden states. 
+        # We must manually handle the conversion to CPU and NumPy if it's on GPU.
         embeddings = self.model.encode([text], output_value='token_embeddings')[0]
-        return embeddings
+        
+        if isinstance(embeddings, torch.Tensor):
+            return embeddings.detach().cpu().numpy()
+        return np.array(embeddings)
 
     def get_dimension(self) -> int:
         """
