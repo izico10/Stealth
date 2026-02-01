@@ -135,7 +135,7 @@ class SparseAutoencoder:
         lr: float = 0.01, 
         batch_size: int = 32,
         patience: int = 10,
-        min_delta: float = 0.005
+        min_delta: float = 0.002
     ) -> dict[str, list[float]]:
         """
         Trains the SAE weights with Early Stopping based on Validation Loss.
